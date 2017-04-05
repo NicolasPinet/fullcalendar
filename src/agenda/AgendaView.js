@@ -22,6 +22,9 @@ var AgendaView = FC.AgendaView = View.extend({
 	// when the time-grid isn't tall enough to occupy the given height, we render an <hr> underneath
 	bottomRuleEl: null,
 
+	// indicates that minTime/maxTime affects rendering
+	usesMinMaxTime: true,
+
 
 	initialize: function() {
 		this.timeGrid = this.instantiateTimeGrid();
@@ -57,19 +60,14 @@ var AgendaView = FC.AgendaView = View.extend({
 	------------------------------------------------------------------------------------------------------------------*/
 
 
-	// Sets the display range and computes all necessary dates
-	setRange: function(range) {
-		View.prototype.setRange.call(this, range); // call the super-method
-
-		this.timeGrid.setRange(range);
-		if (this.dayGrid) {
-			this.dayGrid.setRange(range);
-		}
-	},
-
-
 	// Renders the view into `this.el`, which has already been assigned
 	renderDates: function() {
+
+		this.timeGrid.setRange(this.renderRange);
+
+		if (this.dayGrid) {
+			this.dayGrid.setRange(this.renderRange);
+		}
 
 		this.el.addClass('fc-agenda-view').html(this.renderSkeletonHtml());
 		this.renderHead();

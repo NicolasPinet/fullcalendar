@@ -8,6 +8,7 @@ var Calendar = FC.Calendar = Class.extend({
 	options: null, // all defaults combined with overrides
 	viewSpecCache: null, // cache of view definitions
 	view: null, // current View object
+	currentDate: null, // unzoned moment. private (public API should use getDate instead)
 	header: null,
 	footer: null,
 	loadingLevel: 0, // number of simultaneous loading tasks
@@ -75,7 +76,7 @@ var Calendar = FC.Calendar = Class.extend({
 		var i;
 		var spec;
 
-		if ($.inArray(unit, intervalUnits) != -1) {
+		if ($.inArray(unit, unitsDesc) != -1) {
 
 			// put views that have buttons first. there will be duplicates, but oh well
 			viewTypes = this.header.getViewsWithButtons(); // TODO: include footer as well?
@@ -104,6 +105,7 @@ var Calendar = FC.Calendar = Class.extend({
 		var viewType = requestedViewType;
 		var spec; // for the view
 		var overrides; // for the view
+		var durationInput;
 		var duration;
 		var unit;
 
@@ -120,13 +122,13 @@ var Calendar = FC.Calendar = Class.extend({
 			if (spec) {
 				specChain.unshift(spec);
 				defaultsChain.unshift(spec.defaults || {});
-				duration = duration || spec.duration;
+				durationInput = durationInput || spec.duration;
 				viewType = viewType || spec.type;
 			}
 
 			if (overrides) {
 				overridesChain.unshift(overrides); // view-specific option hashes have options at zero-level
-				duration = duration || overrides.duration;
+				durationInput = durationInput || overrides.duration;
 				viewType = viewType || overrides.type;
 			}
 		}
@@ -137,11 +139,20 @@ var Calendar = FC.Calendar = Class.extend({
 			return false;
 		}
 
-		if (duration) {
-			duration = moment.duration(duration);
+		// fall back to top-level `duration` option
+		durationInput = durationInput ||
+			this.dynamicOverrides.duration ||
+			this.overrides.duration;
+
+		if (durationInput) {
+			duration = moment.duration(durationInput);
+
 			if (duration.valueOf()) { // valid?
+
+				unit = computeDurationGreatestUnit(duration, durationInput);
+
 				spec.duration = duration;
-				unit = computeIntervalUnit(duration);
+				spec.durationUnit = unit;
 
 				// view is a single-unit duration, like "week" or "day"
 				// incorporate options for this. lowest priority
@@ -212,7 +223,7 @@ var Calendar = FC.Calendar = Class.extend({
 	instantiateView: function(viewType) {
 		var spec = this.getViewSpec(viewType);
 
-		return new spec['class'](this, viewType, spec.options, spec.duration);
+		return new spec['class'](this, spec);
 	},
 
 
@@ -254,6 +265,123 @@ var Calendar = FC.Calendar = Class.extend({
 		}
 
 		return { start: start, end: end };
+	},
+
+
+	// Current Date
+	// ------------
+
+
+	/*
+	Called before initialize()
+	*/
+	initCurrentDate: function() {
+		// compute the initial ambig-timezone date
+		if (this.options.defaultDate != null) {
+			this.currentDate = this.moment(this.options.defaultDate).stripZone();
+		}
+		else {
+			this.currentDate = this.getNow(); // getNow already returns unzoned
+		}
+	},
+
+
+	changeView: function(viewName, dateOrRange) {
+
+		if (dateOrRange) {
+
+			if (dateOrRange.start && dateOrRange.end) { // a range
+				this.recordOptionOverrides({ // will not rerender
+					visibleRange: dateOrRange
+				});
+			}
+			else { // a date
+				this.currentDate = this.moment(dateOrRange).stripZone(); // just like gotoDate
+			}
+		}
+
+		this.renderView(viewName);
+	},
+
+
+	prev: function() {
+		var prevInfo = this.view.buildPrevDateProfile(this.currentDate);
+
+		if (prevInfo.isValid) {
+			this.currentDate = prevInfo.date;
+			this.renderView();
+		}
+	},
+
+
+	next: function() {
+		var nextInfo = this.view.buildNextDateProfile(this.currentDate);
+
+		if (nextInfo.isValid) {
+			this.currentDate = nextInfo.date;
+			this.renderView();
+		}
+	},
+
+
+	prevYear: function() {
+		this.currentDate.add(-1, 'years');
+		this.renderView();
+	},
+
+
+	nextYear: function() {
+		this.currentDate.add(1, 'years');
+		this.renderView();
+	},
+
+
+	today: function() {
+		this.currentDate = this.getNow(); // should deny like prev/next?
+		this.renderView();
+	},
+
+
+	gotoDate: function(zonedDateInput) {
+		this.currentDate = this.moment(zonedDateInput).stripZone();
+		this.renderView();
+	},
+
+
+	incrementDate: function(delta) {
+		this.currentDate.add(moment.duration(delta));
+		this.renderView();
+	},
+
+
+	// for external API
+	getDate: function() {
+		return this.applyTimezone(this.currentDate); // infuse the calendar's timezone
+	},
+
+
+	// will return `null` if invalid range
+	parseRange: function(rangeInput) {
+		var start = null;
+		var end = null;
+
+		if (rangeInput.start) {
+			start = this.moment(rangeInput.start).stripZone();
+		}
+
+		if (rangeInput.end) {
+			end = this.moment(rangeInput.end).stripZone();
+		}
+
+		if (!start && !end) {
+			return null;
+		}
+
+		if (start && end && end.isBefore(start)) {
+			return null;
+		}
+
+		return { start: start, end: end };
 	}
 
 });
@@ -275,21 +403,13 @@ function Calendar_constructor(element, overrides) {
 	t.render = render;
 	t.destroy = destroy;
 	t.rerenderEvents = rerenderEvents;
-	t.changeView = renderView; // `renderView` will switch to another view
 	t.select = select;
 	t.unselect = unselect;
-	t.prev = prev;
-	t.next = next;
-	t.prevYear = prevYear;
-	t.nextYear = nextYear;
-	t.today = today;
-	t.gotoDate = gotoDate;
-	t.incrementDate = incrementDate;
 	t.zoomTo = zoomTo;
-	t.getDate = getDate;
 	t.getCalendar = getCalendar;
 	t.getView = getView;
 	t.option = option; // getter/setter method
+	t.recordOptionOverrides = recordOptionOverrides;
 	t.publiclyTrigger = publiclyTrigger;
 
 
@@ -358,8 +478,8 @@ function Calendar_constructor(element, overrides) {
 
 		// If the internal current date object already exists, move to new locale.
 		// We do NOT need to do this technique for event dates, because this happens when converting to "segments".
-		if (date) {
-			localizeMoment(date); // sets to localeData
+		if (t.currentDate) {
+			localizeMoment(t.currentDate); // sets to localeData
 		}
 	});
 
@@ -507,21 +627,13 @@ function Calendar_constructor(element, overrides) {
 	var suggestedViewHeight;
 	var windowResizeProxy; // wraps the windowResize function
 	var ignoreWindowResize = 0;
-	var date; // unzoned
 
+
+	this.initCurrentDate();
 
 
 	// Main Rendering
 	// -----------------------------------------------------------------------------------
-
-
-	// compute the initial ambig-timezone date
-	if (t.options.defaultDate != null) {
-		date = t.moment(t.options.defaultDate).stripZone();
-	}
-	else {
-		date = t.getNow(); // getNow already returns unzoned
-	}
 
 
 	function render() {
@@ -654,32 +766,20 @@ function Calendar_constructor(element, overrides) {
 
 		if (currentView) {
 
-			// in case the view should render a period of time that is completely hidden
-			date = currentView.massageCurrentDate(date);
+			if (elementVisible()) {
 
-			// render or rerender the view
-			if (
-				!currentView.isDateSet ||
-				!( // NOT within interval range signals an implicit date window change
-					date >= currentView.intervalStart &&
-					date < currentView.intervalEnd
-				)
-			) {
-				if (elementVisible()) {
+				if (forcedScroll) {
+					currentView.captureInitialScroll(forcedScroll);
+				}
 
-					if (forcedScroll) {
-						currentView.captureInitialScroll(forcedScroll);
-					}
+				currentView.setDate(t.currentDate);
 
-					currentView.setDate(date, forcedScroll);
+				// TODO: make setDate return the revised date.
+				// Difficult because of the pseudo-async nature, promises.
+				t.currentDate = currentView.currentDate;
 
-					if (forcedScroll) {
-						currentView.releaseScroll();
-					}
-
-					// need to do this after View::render, so dates are calculated
-					// NOTE: view updates title text proactively
-					updateToolbarsTodayButton();
+				if (forcedScroll) {
+					currentView.releaseScroll();
 				}
 			}
 		}
@@ -690,6 +790,7 @@ function Calendar_constructor(element, overrides) {
 
 		ignoreWindowResize--;
 	}
+	t.renderView = renderView;
 
 
 	// Unrenders the current view and reflects this change in the Header.
@@ -797,7 +898,7 @@ function Calendar_constructor(element, overrides) {
 		if (
 			!ignoreWindowResize &&
 			ev.target === window && // so we don't process jqui "resize" events that have bubbled up
-			currentView.start // view has already been rendered
+			currentView.renderRange // view has already been rendered
 		) {
 			if (updateSize(true)) {
 				currentView.publiclyTrigger('windowResize', _element);
@@ -872,15 +973,33 @@ function Calendar_constructor(element, overrides) {
 	};
 
 
-	function updateToolbarsTodayButton() {
+	t.updateToolbarButtons = function() {
 		var now = t.getNow();
-		if (now >= currentView.intervalStart && now < currentView.intervalEnd) {
-			toolbarsManager.proxyCall('disableButton', 'today');
-		}
-		else {
-			toolbarsManager.proxyCall('enableButton', 'today');
-		}
-	}
+		var todayInfo = currentView.buildDateProfile(now);
+		var prevInfo = currentView.buildPrevDateProfile(t.currentDate);
+		var nextInfo = currentView.buildNextDateProfile(t.currentDate);
+
+		toolbarsManager.proxyCall(
+			(todayInfo.isValid && !isDateWithinRange(now, currentView.currentRange)) ?
+				'enableButton' :
+				'disableButton',
+			'today'
+		);
+
+		toolbarsManager.proxyCall(
+			prevInfo.isValid ?
+				'enableButton' :
+				'disableButton',
+			'prev'
+		);
+
+		toolbarsManager.proxyCall(
+			nextInfo.isValid ?
+				'enableButton' :
+				'disableButton',
+			'next'
+		);
+	};
 
 
 
@@ -903,53 +1022,6 @@ function Calendar_constructor(element, overrides) {
 	}
 
 
-
-	/* Date
-	-----------------------------------------------------------------------------*/
-
-
-	function prev() {
-		date = currentView.computePrevDate(date);
-		renderView();
-	}
-
-
-	function next() {
-		date = currentView.computeNextDate(date);
-		renderView();
-	}
-
-
-	function prevYear() {
-		date.add(-1, 'years');
-		renderView();
-	}
-
-
-	function nextYear() {
-		date.add(1, 'years');
-		renderView();
-	}
-
-
-	function today() {
-		date = t.getNow();
-		renderView();
-	}
-
-
-	function gotoDate(zonedDateInput) {
-		date = t.moment(zonedDateInput).stripZone();
-		renderView();
-	}
-
-
-	function incrementDate(delta) {
-		date.add(moment.duration(delta));
-		renderView();
-	}
-
-
 	// Forces navigation to a view for the given date.
 	// `viewType` can be a specific view name or a generic one like "week" or "day".
 	function zoomTo(newDate, viewType) {
@@ -958,14 +1030,8 @@ function Calendar_constructor(element, overrides) {
 		viewType = viewType || 'day'; // day is default zoom
 		spec = t.getViewSpec(viewType) || t.getUnitViewSpec(viewType);
 
-		date = newDate.clone();
+		t.currentDate = newDate.clone();
 		renderView(spec ? spec.type : null);
-	}
-
-
-	// for external API
-	function getDate() {
-		return t.applyTimezone(date); // infuse the calendar's timezone
 	}
 
 
@@ -1040,16 +1106,9 @@ function Calendar_constructor(element, overrides) {
 		var optionCnt = 0;
 		var optionName;
 
-		for (optionName in newOptionHash) {
-			t.dynamicOverrides[optionName] = newOptionHash[optionName];
-		}
+		recordOptionOverrides(newOptionHash);
 
-		t.viewSpecCache = {}; // the dynamic override invalidates the options in this cache, so just clear it
-		t.populateOptionsHash(); // this.options needs to be recomputed after the dynamic override
-
-		// trigger handlers after this.options has been updated
 		for (optionName in newOptionHash) {
-			t.triggerOptionHandlers(optionName); // recall bindOption/bindOptions
 			optionCnt++;
 		}
 
@@ -1082,6 +1141,24 @@ function Calendar_constructor(element, overrides) {
 		renderFooter();
 		viewsByType = {}; // even non-current views will be affected by this option change. do before rerender
 		reinitView();
+	}
+
+
+	// stores the new options internally, but does not rerender anything.
+	function recordOptionOverrides(newOptionHash) {
+		var optionName;
+
+		for (optionName in newOptionHash) {
+			t.dynamicOverrides[optionName] = newOptionHash[optionName];
+		}
+
+		t.viewSpecCache = {}; // the dynamic override invalidates the options in this cache, so just clear it
+		t.populateOptionsHash(); // this.options needs to be recomputed after the dynamic override
+
+		// trigger handlers after this.options has been updated
+		for (optionName in newOptionHash) {
+			t.triggerOptionHandlers(optionName); // recall bindOption/bindOptions
+		}
 	}
 
 

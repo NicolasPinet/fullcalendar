@@ -169,6 +169,18 @@ var Grid = FC.Grid = Class.extend(ListenerMixin, {
 	},
 
 
+	// like getHitSpan, but returns null if the resulting span's range is invalid
+	getSafeHitSpan: function(hit) {
+		var hitSpan = this.getHitSpan(hit);
+
+		if (!isRangeWithinRange(hitSpan, this.view.activeRange)) {
+			return null;
+		}
+
+		return hitSpan;
+	},
+
+
 	// Given position-level information about a date-related area within the grid,
 	// should return an object with at least a start/end date. Can provide other information as well.
 	getHitSpan: function(hit) {
@@ -279,9 +291,9 @@ var Grid = FC.Grid = Class.extend(ListenerMixin, {
 	dayMousedown: function(ev) {
 		var view = this.view;
 
-		// prevent a user's clickaway for unselecting a range or an event from
-		// causing a dayClick or starting an immediate new selection.
-		if (view.isSelected || view.selectedEvent) {
+		// HACK
+		// This will still work even though bindDayHandler doesn't use GlobalEmitter.
+		if (GlobalEmitter.get().shouldIgnoreMouse()) {
 			return;
 		}
 
@@ -299,8 +311,10 @@ var Grid = FC.Grid = Class.extend(ListenerMixin, {
 		var view = this.view;
 		var selectLongPressDelay;
 
-		// prevent a user's clickaway for unselecting a range or an event from
-		// causing a dayClick or starting an immediate new selection.
+		// On iOS (and Android?) when a new selection is initiated overtop another selection,
+		// the touchend never fires because the elements gets removed mid-touch-interaction (my theory).
+		// HACK: simply don't allow this to happen.
+		// ALSO: prevent selection when an *event* is already raised.
 		if (view.isSelected || view.selectedEvent) {
 			return;
 		}
@@ -341,12 +355,14 @@ var Grid = FC.Grid = Class.extend(ListenerMixin, {
 				dayClickHit = null;
 			},
 			interactionEnd: function(ev, isCancelled) {
+				var hitSpan;
+
 				if (!isCancelled && dayClickHit) {
-					view.triggerDayClick(
-						_this.getHitSpan(dayClickHit),
-						_this.getHitEl(dayClickHit),
-						ev
-					);
+					hitSpan = _this.getSafeHitSpan(dayClickHit);
+
+					if (hitSpan) {
+						view.triggerDayClick(hitSpan, _this.getHitEl(dayClickHit), ev);
+					}
 				}
 			}
 		});
@@ -376,12 +392,20 @@ var Grid = FC.Grid = Class.extend(ListenerMixin, {
 				view.unselect(); // since we could be rendering a new selection, we want to clear any old one
 			},
 			hitOver: function(hit, isOrig, origHit) {
+				var origHitSpan;
+				var hitSpan;
+
 				if (origHit) { // click needs to have started on a hit
 
-					selectionSpan = _this.computeSelection(
-						_this.getHitSpan(origHit),
-						_this.getHitSpan(hit)
-					);
+					origHitSpan = _this.getSafeHitSpan(origHit);
+					hitSpan = _this.getSafeHitSpan(hit);
+
+					if (origHitSpan && hitSpan) {
+						selectionSpan = _this.computeSelection(origHitSpan, hitSpan);
+					}
+					else {
+						selectionSpan = null;
+					}
 
 					if (selectionSpan) {
 						_this.renderSelection(selectionSpan);
@@ -670,28 +694,37 @@ var Grid = FC.Grid = Class.extend(ListenerMixin, {
 	// Computes HTML classNames for a single-day element
 	getDayClasses: function(date, noThemeHighlight) {
 		var view = this.view;
-		var today = view.calendar.getNow();
-		var classes = [ 'fc-' + dayIDs[date.day()] ];
+		var classes = [];
+		var today;
 
-		if (
-			view.intervalDuration.as('months') == 1 &&
-			date.month() != view.intervalStart.month()
-		) {
-			classes.push('fc-other-month');
-		}
-
-		if (date.isSame(today, 'day')) {
-			classes.push('fc-today');
-
-			if (noThemeHighlight !== true) {
-				classes.push(view.highlightStateClass);
-			}
-		}
-		else if (date < today) {
-			classes.push('fc-past');
+		if (!isDateWithinRange(date, view.activeRange)) {
+			classes.push('fc-disabled-day'); // TODO: jQuery UI theme?
 		}
 		else {
-			classes.push('fc-future');
+			classes.push('fc-' + dayIDs[date.day()]);
+
+			if (
+				view.currentRangeAs('months') == 1 && // TODO: somehow get into MonthView
+				date.month() != view.currentRange.start.month()
+			) {
+				classes.push('fc-other-month');
+			}
+
+			today = view.calendar.getNow();
+
+			if (date.isSame(today, 'day')) {
+				classes.push('fc-today');
+
+				if (noThemeHighlight !== true) {
+					classes.push(view.highlightStateClass);
+				}
+			}
+			else if (date < today) {
+				classes.push('fc-past');
+			}
+			else {
+				classes.push('fc-future');
+			}
 		}
 
 		return classes;

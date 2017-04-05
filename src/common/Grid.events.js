@@ -1,6 +1,16 @@
 
 /* Event-rendering and event-interaction methods for the abstract Grid class
-----------------------------------------------------------------------------------------------------------------------*/
+----------------------------------------------------------------------------------------------------------------------
+
+Data Types:
+	event - { title, id, start, (end), whatever }
+	location - { start, (end), allDay }
+	rawEventRange - { start, end }
+	eventRange - { start, end, isStart, isEnd }
+	eventSpan - { start, end, isStart, isEnd, whatever }
+	eventSeg - { event, whatever }
+	seg - { whatever }
+*/
 
 Grid.mixin({
 
@@ -208,8 +218,8 @@ Grid.mixin({
 		if (!events.length && businessHours) {
 			events = [
 				$.extend({}, BUSINESS_HOUR_EVENT_DEFAULTS, {
-					start: this.view.end, // guaranteed out-of-range
-					end: this.view.end,   // "
+					start: this.view.activeRange.end, // guaranteed out-of-range
+					end: this.view.activeRange.end,   // "
 					dow: null
 				})
 			];
@@ -363,7 +373,6 @@ Grid.mixin({
 	buildSegDragListener: function(seg) {
 		var _this = this;
 		var view = this.view;
-		var calendar = view.calendar;
 		var el = seg.el;
 		var event = seg.event;
 		var isDragging;
@@ -404,6 +413,9 @@ Grid.mixin({
 				view.hideEvent(event); // hide all event segments. our mouseFollower will take over
 			},
 			hitOver: function(hit, isOrig, origHit) {
+				var isAllowed = true;
+				var origHitSpan;
+				var hitSpan;
 				var dragHelperEls;
 
 				// starting hit could be forced (DayGrid.limit)
@@ -411,16 +423,21 @@ Grid.mixin({
 					origHit = seg.hit;
 				}
 
-				// since we are querying the parent view, might not belong to this grid
-				dropLocation = _this.computeEventDrop(
-					origHit.component.getHitSpan(origHit),
-					hit.component.getHitSpan(hit),
-					event
-				);
+				// hit might not belong to this grid, so query origin grid
+				origHitSpan = origHit.component.getSafeHitSpan(origHit);
+				hitSpan = hit.component.getSafeHitSpan(hit);
 
-				if (dropLocation && !calendar.isEventSpanAllowed(_this.eventToSpan(dropLocation), event)) {
-					disableCursor();
+				if (origHitSpan && hitSpan) {
+					dropLocation = _this.computeEventDrop(origHitSpan, hitSpan, event);
+					isAllowed = dropLocation && _this.isEventLocationAllowed(dropLocation, event);
+				}
+				else {
+					isAllowed = false;
+				}
+
+				if (!isAllowed) {
 					dropLocation = null;
+					disableCursor();
 				}
 
 				// if a valid drop location, have the subclass render a visual indication
@@ -602,7 +619,7 @@ Grid.mixin({
 	// Called when a jQuery UI drag starts and it needs to be monitored for dropping
 	listenToExternalDrag: function(el, ev, ui) {
 		var _this = this;
-		var calendar = this.view.calendar;
+		var view = this.view;
 		var meta = getDraggedElMeta(el); // extra data about event drop, including possible event to create
 		var dropLocation; // a null value signals an unsuccessful drag
 
@@ -612,17 +629,20 @@ Grid.mixin({
 				_this.isDraggingExternal = true;
 			},
 			hitOver: function(hit) {
-				dropLocation = _this.computeExternalDrop(
-					hit.component.getHitSpan(hit), // since we are querying the parent view, might not belong to this grid
-					meta
-				);
+				var isAllowed = true;
+				var hitSpan = hit.component.getSafeHitSpan(hit); // hit might not belong to this grid
 
-				if ( // invalid hit?
-					dropLocation &&
-					!calendar.isExternalSpanAllowed(_this.eventToSpan(dropLocation), dropLocation, meta.eventProps)
-				) {
-					disableCursor();
+				if (hitSpan) {
+					dropLocation = _this.computeExternalDrop(hitSpan, meta);
+					isAllowed = dropLocation && _this.isExternalLocationAllowed(dropLocation, meta.eventProps);
+				}
+				else {
+					isAllowed = false;
+				}
+
+				if (!isAllowed) {
 					dropLocation = null;
+					disableCursor();
 				}
 
 				if (dropLocation) {
@@ -638,7 +658,7 @@ Grid.mixin({
 			},
 			interactionEnd: function(ev) {
 				if (dropLocation) { // element was dropped on a valid hit
-					_this.view.reportExternalDrop(meta, dropLocation, el, ev, ui);
+					view.reportExternalDrop(meta, dropLocation, el, ev, ui);
 				}
 				_this.isDraggingExternal = false;
 				_this.externalDragListener = null;
@@ -723,23 +743,31 @@ Grid.mixin({
 				_this.segResizeStart(seg, ev);
 			},
 			hitOver: function(hit, isOrig, origHit) {
-				var origHitSpan = _this.getHitSpan(origHit);
-				var hitSpan = _this.getHitSpan(hit);
+				var isAllowed = true;
+				var origHitSpan = _this.getSafeHitSpan(origHit);
+				var hitSpan = _this.getSafeHitSpan(hit);
 
-				resizeLocation = isStart ?
-					_this.computeEventStartResize(origHitSpan, hitSpan, event) :
-					_this.computeEventEndResize(origHitSpan, hitSpan, event);
+				if (origHitSpan && hitSpan) {
+					resizeLocation = isStart ?
+						_this.computeEventStartResize(origHitSpan, hitSpan, event) :
+						_this.computeEventEndResize(origHitSpan, hitSpan, event);
 
-				if (resizeLocation) {
-					if (!calendar.isEventSpanAllowed(_this.eventToSpan(resizeLocation), event)) {
-						disableCursor();
-						resizeLocation = null;
-					}
-					// no change? (FYI, event dates might have zones)
-					else if (
+					isAllowed = resizeLocation && _this.isEventLocationAllowed(resizeLocation, event);
+				}
+				else {
+					isAllowed = false;
+				}
+
+				if (!isAllowed) {
+					resizeLocation = null;
+					disableCursor();
+				}
+				else {
+					if (
 						resizeLocation.start.isSame(event.start.clone().stripZone()) &&
 						resizeLocation.end.isSame(eventEnd.clone().stripZone())
 					) {
+						// no change. (FYI, event dates might have zones)
 						resizeLocation = null;
 					}
 				}
@@ -991,6 +1019,60 @@ Grid.mixin({
 	},
 
 
+	/* Event Location Validation
+	------------------------------------------------------------------------------------------------------------------*/
+
+
+	isEventLocationAllowed: function(eventLocation, event) {
+		if (this.isEventLocationInRange(eventLocation)) {
+			var calendar = this.view.calendar;
+			var eventSpans = this.eventToSpans(eventLocation);
+			var i;
+
+			if (eventSpans.length) {
+				for (i = 0; i < eventSpans.length; i++) {
+					if (!calendar.isEventSpanAllowed(eventSpans[i], event)) {
+						return false;
+					}
+				}
+
+				return true;
+			}
+		}
+
+		return false;
+	},
+
+
+	isExternalLocationAllowed: function(eventLocation, metaProps) { // FOR the external element
+		if (this.isEventLocationInRange(eventLocation)) {
+			var calendar = this.view.calendar;
+			var eventSpans = this.eventToSpans(eventLocation);
+			var i;
+
+			if (eventSpans.length) {
+				for (i = 0; i < eventSpans.length; i++) {
+					if (!calendar.isExternalSpanAllowed(eventSpans[i], eventLocation, metaProps)) {
+						return false;
+					}
+				}
+
+				return true;
+			}
+		}
+
+		return false;
+	},
+
+
+	isEventLocationInRange: function(eventLocation) {
+		return isRangeWithinRange(
+			this.eventToRawRange(eventLocation),
+			this.view.validRange
+		);
+	},
+
+
 	/* Converting events -> eventRange -> eventSpan -> eventSegs
 	------------------------------------------------------------------------------------------------------------------*/
 
@@ -1002,17 +1084,18 @@ Grid.mixin({
 	},
 
 
-	eventToSpan: function(event) {
-		return this.eventToSpans(event)[0];
-	},
-
-
 	// Generates spans (always unzoned) for the given event.
 	// Does not do any inverting for inverse-background events.
 	// Can accept an event "location" as well (which only has start/end and no allDay)
 	eventToSpans: function(event) {
-		var range = this.eventToRange(event);
-		return this.eventRangeToSpans(range, event);
+		var eventRange = this.eventToRange(event); // { start, end, isStart, isEnd }
+
+		if (eventRange) {
+			return this.eventRangeToSpans(eventRange, event);
+		}
+		else { // out of view's valid range
+			return [];
+		}
 	},
 
 
@@ -1026,27 +1109,36 @@ Grid.mixin({
 		var segs = [];
 
 		$.each(eventsById, function(id, events) {
-			var ranges = [];
+			var visibleEvents = [];
+			var eventRanges = [];
+			var eventRange; // { start, end, isStart, isEnd }
 			var i;
 
 			for (i = 0; i < events.length; i++) {
-				ranges.push(_this.eventToRange(events[i]));
+				eventRange = _this.eventToRange(events[i]); // might be null if completely out of range
+
+				if (eventRange) {
+					eventRanges.push(eventRange);
+					visibleEvents.push(events[i]);
+				}
 			}
 
 			// inverse-background events (utilize only the first event in calculations)
 			if (isInverseBgEvent(events[0])) {
-				ranges = _this.invertRanges(ranges);
+				eventRanges = _this.invertRanges(eventRanges); // will lose isStart/isEnd
 
-				for (i = 0; i < ranges.length; i++) {
+				for (i = 0; i < eventRanges.length; i++) {
 					segs.push.apply(segs, // append to
-						_this.eventRangeToSegs(ranges[i], events[0], segSliceFunc));
+						_this.eventRangeToSegs(eventRanges[i], events[0], segSliceFunc)
+					);
 				}
 			}
 			// normal event ranges
 			else {
-				for (i = 0; i < ranges.length; i++) {
+				for (i = 0; i < eventRanges.length; i++) {
 					segs.push.apply(segs, // append to
-						_this.eventRangeToSegs(ranges[i], events[i], segSliceFunc));
+						_this.eventRangeToSegs(eventRanges[i], visibleEvents[i], segSliceFunc)
+					);
 				}
 			}
 		});
@@ -1057,7 +1149,36 @@ Grid.mixin({
 
 	// Generates the unzoned start/end dates an event appears to occupy
 	// Can accept an event "location" as well (which only has start/end and no allDay)
+	// returns { start, end, isStart, isEnd }
+	// If the event is completely outside of the grid's valid range, will return undefined.
 	eventToRange: function(event) {
+		return this.refineRawEventRange(
+			this.eventToRawRange(event)
+		);
+	},
+
+
+	// Ensures the given range is within the view's activeRange and is correctly localized.
+	// Always returns a result
+	refineRawEventRange: function(rawRange) {
+		var view = this.view;
+		var calendar = view.calendar;
+		var range = intersectRanges(rawRange, view.activeRange);
+
+		if (range) { // otherwise, event doesn't have valid range
+
+			// hack: dynamic locale change forgets to upate stored event localed
+			calendar.localizeMoment(range.start);
+			calendar.localizeMoment(range.end);
+
+			return range;
+		}
+	},
+
+
+	// not constrained to valid dates
+	// not given localizeMoment hack
+	eventToRawRange: function(event) {
 		var calendar = this.view.calendar;
 		var start = event.start.clone().stripZone();
 		var end = (
@@ -1072,48 +1193,58 @@ Grid.mixin({
 					)
 			).stripZone();
 
-		// hack: dynamic locale change forgets to upate stored event localed
-		calendar.localizeMoment(start);
-		calendar.localizeMoment(end);
-
 		return { start: start, end: end };
 	},
 
 
 	// Given an event's range (unzoned start/end), and the event itself,
 	// slice into segments (using the segSliceFunc function if specified)
-	eventRangeToSegs: function(range, event, segSliceFunc) {
-		var spans = this.eventRangeToSpans(range, event);
+	// eventRange - { start, end, isStart, isEnd }
+	eventRangeToSegs: function(eventRange, event, segSliceFunc) {
+		var eventSpans = this.eventRangeToSpans(eventRange, event);
 		var segs = [];
 		var i;
 
-		for (i = 0; i < spans.length; i++) {
+		for (i = 0; i < eventSpans.length; i++) {
 			segs.push.apply(segs, // append to
-				this.eventSpanToSegs(spans[i], event, segSliceFunc));
+				this.eventSpanToSegs(eventSpans[i], event, segSliceFunc)
+			);
 		}
 
 		return segs;
 	},
 
 
-	// Given an event's unzoned date range, return an array of "span" objects.
+	// Given an event's unzoned date range, return an array of eventSpan objects.
+	// eventSpan - { start, end, isStart, isEnd, otherthings... }
 	// Subclasses can override.
-	eventRangeToSpans: function(range, event) {
-		return [ $.extend({}, range) ]; // copy into a single-item array
+	// Subclasses are obligated to forward eventRange.isStart/isEnd to the resulting spans.
+	eventRangeToSpans: function(eventRange, event) {
+		return [ $.extend({}, eventRange) ]; // copy into a single-item array
 	},
 
 
 	// Given an event's span (unzoned start/end and other misc data), and the event itself,
 	// slices into segments and attaches event-derived properties to them.
-	eventSpanToSegs: function(span, event, segSliceFunc) {
-		var segs = segSliceFunc ? segSliceFunc(span) : this.spanToSegs(span);
+	// eventSpan - { start, end, isStart, isEnd, otherthings... }
+	eventSpanToSegs: function(eventSpan, event, segSliceFunc) {
+		var segs = segSliceFunc ? segSliceFunc(eventSpan) : this.spanToSegs(eventSpan);
 		var i, seg;
 
 		for (i = 0; i < segs.length; i++) {
 			seg = segs[i];
+
+			// the eventSpan's isStart/isEnd takes precedence over the seg's
+			if (!eventSpan.isStart) {
+				seg.isStart = false;
+			}
+			if (!eventSpan.isEnd) {
+				seg.isEnd = false;
+			}
+
 			seg.event = event;
-			seg.eventStartMS = +span.start; // TODO: not the best name after making spans unzoned
-			seg.eventDurationMS = span.end - span.start;
+			seg.eventStartMS = +eventSpan.start; // TODO: not the best name after making spans unzoned
+			seg.eventDurationMS = eventSpan.end - eventSpan.start;
 		}
 
 		return segs;
@@ -1124,8 +1255,8 @@ Grid.mixin({
 	// SIDE EFFECT: will mutate the given array and will use its date references.
 	invertRanges: function(ranges) {
 		var view = this.view;
-		var viewStart = view.start.clone(); // need a copy
-		var viewEnd = view.end.clone(); // need a copy
+		var viewStart = view.activeRange.start.clone(); // need a copy
+		var viewEnd = view.activeRange.end.clone(); // need a copy
 		var inverseRanges = [];
 		var start = viewStart; // the end of the previous range. the start of the new range
 		var i, range;

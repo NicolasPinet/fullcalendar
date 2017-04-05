@@ -9,6 +9,7 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	title: null, // the text that will be displayed in the header's title
 
 	calendar: null, // owner Calendar object
+	viewSpec: null,
 	options: null, // hash containing all options. already merged with view-specific-options
 	el: null, // the view's containing element. set by Calendar
 
@@ -20,17 +21,6 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	isEventsSet: false,
 	isEventsRendered: false,
 	eventRenderQueue: null,
-
-	// range the view is actually displaying (moments)
-	start: null,
-	end: null, // exclusive
-
-	// range the view is formally responsible for (moments)
-	// may be different from start/end. for example, a month view might have 1st-31st, excluding padded dates
-	intervalStart: null,
-	intervalEnd: null, // exclusive
-	intervalDuration: null,
-	intervalUnit: null, // name of largest unit being displayed, like "month" or "week"
 
 	isRTL: false,
 	isSelected: false, // boolean whether a range of time is user-selected or not
@@ -55,12 +45,17 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	nowIndicatorIntervalID: null, // "
 
 
-	constructor: function(calendar, type, options, intervalDuration) {
+	constructor: function(calendar, viewSpec) {
 
 		this.calendar = calendar;
-		this.type = this.name = type; // .name is deprecated
-		this.options = options;
-		this.intervalDuration = intervalDuration || moment.duration(1, 'day');
+		this.viewSpec = viewSpec;
+
+		// shortcuts
+		this.type = viewSpec.type;
+		this.options = viewSpec.options;
+
+		// .name is deprecated
+		this.name = this.type;
 
 		this.nextDayThreshold = moment.duration(this.opt('nextDayThreshold'));
 		this.initThemingProps();
@@ -125,85 +120,6 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	},
 
 
-	/* Date Computation
-	------------------------------------------------------------------------------------------------------------------*/
-
-
-	// Updates all internal dates for displaying the given unzoned range.
-	setRange: function(range) {
-		$.extend(this, range); // assigns every property to this object's member variables
-		this.updateTitle();
-	},
-
-
-	// Given a single current unzoned date, produce information about what range to display.
-	// Subclasses can override. Must return all properties.
-	computeRange: function(date) {
-		var intervalUnit = computeIntervalUnit(this.intervalDuration);
-		var intervalStart = date.clone().startOf(intervalUnit);
-		var intervalEnd = intervalStart.clone().add(this.intervalDuration);
-		var start, end;
-
-		// normalize the range's time-ambiguity
-		if (/year|month|week|day/.test(intervalUnit)) { // whole-days?
-			intervalStart.stripTime();
-			intervalEnd.stripTime();
-		}
-		else { // needs to have a time?
-			if (!intervalStart.hasTime()) {
-				intervalStart = this.calendar.time(0); // give 00:00 time
-			}
-			if (!intervalEnd.hasTime()) {
-				intervalEnd = this.calendar.time(0); // give 00:00 time
-			}
-		}
-
-		start = intervalStart.clone();
-		start = this.skipHiddenDays(start);
-		end = intervalEnd.clone();
-		end = this.skipHiddenDays(end, -1, true); // exclusively move backwards
-
-		return {
-			intervalUnit: intervalUnit,
-			intervalStart: intervalStart,
-			intervalEnd: intervalEnd,
-			start: start,
-			end: end
-		};
-	},
-
-
-	// Computes the new date when the user hits the prev button, given the current date
-	computePrevDate: function(date) {
-		return this.massageCurrentDate(
-			date.clone().startOf(this.intervalUnit).subtract(this.intervalDuration), -1
-		);
-	},
-
-
-	// Computes the new date when the user hits the next button, given the current date
-	computeNextDate: function(date) {
-		return this.massageCurrentDate(
-			date.clone().startOf(this.intervalUnit).add(this.intervalDuration)
-		);
-	},
-
-
-	// Given an arbitrarily calculated current date of the calendar, returns a date that is ensured to be completely
-	// visible. `direction` is optional and indicates which direction the current date was being
-	// incremented or decremented (1 or -1).
-	massageCurrentDate: function(date, direction) {
-		if (this.intervalDuration.as('days') <= 1) { // if the view displays a single day or smaller
-			if (this.isHiddenDay(date)) {
-				date = this.skipHiddenDays(date, direction);
-				date.startOf('day');
-			}
-		}
-
-		return date;
-	},
-
-
 	/* Title and Date Formatting
 	------------------------------------------------------------------------------------------------------------------*/
 
@@ -217,23 +133,21 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 	// Computes what the title at the top of the calendar should be for this view
 	computeTitle: function() {
-		var start, end;
+		var range;
 
 		// for views that span a large unit of time, show the proper interval, ignoring stray days before and after
-		if (this.intervalUnit === 'year' || this.intervalUnit === 'month') {
-			start = this.intervalStart;
-			end = this.intervalEnd;
+		if (/^(year|month)$/.test(this.currentRangeUnit)) {
+			range = this.currentRange;
 		}
 		else { // for day units or smaller, use the actual day range
-			start = this.start;
-			end = this.end;
+			range = this.activeRange;
 		}
 
 		return this.formatRange(
 			{
-				// in case intervalStart/End has a time, make sure timezone is correct
-				start: this.calendar.applyTimezone(start),
-				end: this.calendar.applyTimezone(end)
+				// in case currentRange has a time, make sure timezone is correct
+				start: this.calendar.applyTimezone(range.start),
+				end: this.calendar.applyTimezone(range.end)
 			},
 			this.opt('titleFormat') || this.computeTitleFormat(),
 			this.opt('titleRangeSeparator')
@@ -244,13 +158,13 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	// Generates the format string that should be used to generate the title for the current date range.
 	// Attempts to compute the most appropriate format if not explicitly specified with `titleFormat`.
 	computeTitleFormat: function() {
-		if (this.intervalUnit == 'year') {
+		if (this.currentRangeUnit == 'year') {
 			return 'YYYY';
 		}
-		else if (this.intervalUnit == 'month') {
+		else if (this.currentRangeUnit == 'month') {
 			return this.opt('monthYearFormat'); // like "September 2014"
 		}
-		else if (this.intervalDuration.as('days') > 1) {
+		else if (this.currentRangeAs('days') > 1) {
 			return 'll'; // multi-day range. shorter, like "Sep 9 - 10 2014"
 		}
 		else {
@@ -377,7 +291,7 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 		var isReset = this.isDateSet;
 
 		this.isDateSet = true;
-		this.handleDate(date, isReset);
+		this.handleRawDate(date);
 		this.trigger(isReset ? 'dateReset' : 'dateSet', date);
 	},
 
@@ -395,12 +309,31 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	// -----------------------------------------------------------------------------------------------------------------
 
 
-	handleDate: function(date, isReset) {
+	handleRawDate: function(date) {
+		var _this = this;
+		var dateProfile = this.buildDateProfile(date, null, true); // forceToValid=true
+
+		if (!this.isSameDateProfile(dateProfile)) { // real change
+			this.handleDate(dateProfile);
+		}
+		else {
+			// View might have no date change, but still needs to render (because of a view unrender/rerender).
+			// Wait for possible queued unrenders. TODO: refactor.
+			this.dateRenderQueue.add(function() {
+				if (!_this.isDateRendered) {
+					_this.handleDate(dateProfile);
+				}
+			});
+		}
+	},
+
+
+	handleDate: function(dateProfile) {
 		var _this = this;
 
 		this.unbindEvents(); // will do nothing if not already bound
-		this.requestDateRender(date).then(function() {
-			// wish we could start earlier, but setRange/computeRange needs to execute first
+		this.requestDateRender(dateProfile).then(function() {
+			// wish we could start earlier, but setDateProfile needs to execute first
 			_this.bindEvents(); // will request events
 		});
 	},
@@ -416,12 +349,12 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	// -----------------------------------------------------------------------------------------------------------------
 
 
-	// if date not specified, uses current
-	requestDateRender: function(date) {
+	// if dateProfile not specified, uses current
+	requestDateRender: function(dateProfile) {
 		var _this = this;
 
 		return this.dateRenderQueue.add(function() {
-			return _this.executeDateRender(date);
+			return _this.executeDateRender(dateProfile);
 		});
 	},
 
@@ -439,12 +372,19 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	// -----------------------------------------------------------------------------------------------------------------
 
 
-	// if date not specified, uses current
-	executeDateRender: function(date) {
+	// if dateProfile not specified, uses current
+	executeDateRender: function(dateProfile) {
 		var _this = this;
 
+		if (dateProfile) {
+			_this.setDateProfile(dateProfile);
+		}
+
+		this.updateTitle();
+		this.calendar.updateToolbarButtons();
+
 		// if rendering a new date, reset scroll to initial state (scrollTime)
-		if (date) {
+		if (dateProfile) {
 			this.captureInitialScroll();
 		}
 		else {
@@ -453,11 +393,8 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 		this.freezeHeight();
 
+		// potential issue: date-unrendering will happen with the *new* range
 		return this.executeDateUnrender().then(function() {
-
-			if (date) {
-				_this.setRange(_this.computeRange(date));
-			}
 
 			if (_this.render) {
 				_this.render(); // TODO: deprecate
@@ -1028,7 +965,10 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 
 	requestEvents: function() {
-		return this.calendar.requestEvents(this.start, this.end);
+		return this.calendar.requestEvents(
+			this.activeRange.start,
+			this.activeRange.end
+		);
 	},
 
 
@@ -1400,59 +1340,6 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 	/* Date Utils
 	------------------------------------------------------------------------------------------------------------------*/
-
-
-	// Initializes internal variables related to calculating hidden days-of-week
-	initHiddenDays: function() {
-		var hiddenDays = this.opt('hiddenDays') || []; // array of day-of-week indices that are hidden
-		var isHiddenDayHash = []; // is the day-of-week hidden? (hash with day-of-week-index -> bool)
-		var dayCnt = 0;
-		var i;
-
-		if (this.opt('weekends') === false) {
-			hiddenDays.push(0, 6); // 0=sunday, 6=saturday
-		}
-
-		for (i = 0; i < 7; i++) {
-			if (
-				!(isHiddenDayHash[i] = $.inArray(i, hiddenDays) !== -1)
-			) {
-				dayCnt++;
-			}
-		}
-
-		if (!dayCnt) {
-			throw 'invalid hiddenDays'; // all days were hidden? bad.
-		}
-
-		this.isHiddenDayHash = isHiddenDayHash;
-	},
-
-
-	// Is the current day hidden?
-	// `day` is a day-of-week index (0-6), or a Moment
-	isHiddenDay: function(day) {
-		if (moment.isMoment(day)) {
-			day = day.day();
-		}
-		return this.isHiddenDayHash[day];
-	},
-
-
-	// Incrementing the current day until it is no longer a hidden day, returning a copy.
-	// If the initial value of `date` is not a hidden day, don't do anything.
-	// Pass `isExclusive` as `true` if you are dealing with an end date.
-	// `inc` defaults to `1` (increment one day forward each time)
-	skipHiddenDays: function(date, inc, isExclusive) {
-		var out = date.clone();
-		inc = inc || 1;
-		while (
-			this.isHiddenDayHash[(out.day() + (isExclusive ? inc : 0) + 7) % 7]
-		) {
-			out.add(inc, 'days');
-		}
-		return out;
-	},
 
 
 	// Returns the date range of the full days the given range visually appears to occupy.
